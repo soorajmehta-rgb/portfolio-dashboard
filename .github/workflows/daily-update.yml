@@ -1,0 +1,445 @@
+#!/usr/bin/env python3
+"""
+India + US Portfolio Dashboard Auto-Updater
+Runs daily at 5am GST (1am UTC) via GitHub Actions
+Fetches previous day closing prices and regenerates dashboard HTML
+"""
+ 
+import json
+import datetime
+import os
+import sys
+import time
+import urllib.request
+import urllib.parse
+ 
+# ── YOUR HOLDINGS ─────────────────────────────────────────────────────────────
+ 
+US_STOCKS = {
+    "NVDA":  {"shares": 60,  "name": "NVIDIA"},
+    "LULU":  {"shares": 26,  "name": "Lululemon"},
+    "PYPL":  {"shares": 92,  "name": "PayPal"},
+    "ADBE":  {"shares": 13,  "name": "Adobe"},
+    "CI":    {"shares": 12,  "name": "Cigna"},
+    "NOW":   {"shares": 40,  "name": "ServiceNow"},
+    "SAP":   {"shares": 10,  "name": "SAP SE"},
+    "QCOM":  {"shares": 20,  "name": "Qualcomm"},
+    "V":     {"shares": 8,   "name": "Visa"},
+    "PLTR":  {"shares": 20,  "name": "Palantir"},
+    "GOOGL": {"shares": 15,  "name": "Alphabet"},
+    "MSFT":  {"shares": 6,   "name": "Microsoft"},
+    "ACHR":  {"shares": 300, "name": "Archer Aviation"},
+    "NFLX":  {"shares": 20,  "name": "Netflix"},
+    "CRWV":  {"shares": 37,  "name": "CoreWeave"},
+    "LYFT":  {"shares": 100, "name": "Lyft"},
+    "JOBY":  {"shares": 200, "name": "Joby Aviation"},
+    "SHOP":  {"shares": 12,  "name": "Shopify"},
+}
+ 
+COMMODITY_ETFS = {
+    "GLDM": {"shares": 30, "name": "SPDR Gold MiniShares"},
+    "UGL":  {"shares": 12, "name": "ProShares Ultra Gold 2x"},
+    "SIVR": {"shares": 45, "name": "Aberdeen Silver ETF"},
+    "AGQ":  {"shares": 6,  "name": "ProShares Ultra Silver 2x"},
+    "CPER": {"shares": 29, "name": "US Copper Index Fund"},
+}
+ 
+INDIA_STOCKS = {
+    # NSE symbol: {shares, name, sector, portfolio}
+    "HDFCBANK":    {"shares": 390,  "name": "HDFC Bank",             "sector": "banking",  "port": True},
+    "ICICIBANK":   {"shares": 33,   "name": "ICICI Bank",            "sector": "banking",  "port": True},
+    "SBIN":        {"shares": 40,   "name": "State Bank of India",   "sector": "banking",  "port": True},
+    "KOTAKBANK":   {"shares": 250,  "name": "Kotak Mahindra Bank",   "sector": "banking",  "port": True},
+    "AXISBANK":    {"shares": 20,   "name": "Axis Bank",             "sector": "banking",  "port": True},
+    "FEDERALBNK":  {"shares": 400,  "name": "Federal Bank",          "sector": "banking",  "port": True},
+    "INDUSINDBK":  {"shares": 320,  "name": "IndusInd Bank",         "sector": "banking",  "port": True},
+    "BAJFINANCE":  {"shares": 40,   "name": "Bajaj Finance",         "sector": "banking",  "port": True},
+    "JIOFIN":      {"shares": 288,  "name": "Jio Financial",         "sector": "banking",  "port": True},
+    "YESBANK":     {"shares": 3700, "name": "Yes Bank",              "sector": "banking",  "port": True},
+    "CSBBANK":     {"shares": 0,    "name": "CSB Bank",              "sector": "banking",  "port": False},
+    "J&KBANK":     {"shares": 450,  "name": "J&K Bank",              "sector": "banking",  "port": True},
+    "HDBFIN":      {"shares": 0,    "name": "HDB Financial",         "sector": "banking",  "port": False},
+    "TCS":         {"shares": 0,    "name": "TCS",                   "sector": "it",       "port": False},
+    "INFY":        {"shares": 0,    "name": "Infosys",               "sector": "it",       "port": False},
+    "HCLTECH":     {"shares": 52,   "name": "HCL Technologies",      "sector": "it",       "port": True},
+    "DATAMATICS":  {"shares": 50,   "name": "Datamatics",            "sector": "it",       "port": True},
+    "PROTEAN":     {"shares": 170,  "name": "Protean eGov",          "sector": "it",       "port": True},
+    "MAPMYINDIA":  {"shares": 30,   "name": "CE Info Systems",       "sector": "it",       "port": True},
+    "ETERNAL":     {"shares": 1100, "name": "Eternal (Zomato)",      "sector": "newage",   "port": True},
+    "SWIGGY":      {"shares": 0,    "name": "Swiggy",                "sector": "newage",   "port": False},
+    "ZAGGLE":      {"shares": 450,  "name": "Zaggle Prepaid",        "sector": "newage",   "port": True},
+    "RELIANCE":    {"shares": 336,  "name": "Reliance Industries",   "sector": "energy",   "port": True},
+    "NTPC":        {"shares": 0,    "name": "NTPC",                  "sector": "energy",   "port": False},
+    "ONGC":        {"shares": 0,    "name": "ONGC",                  "sector": "energy",   "port": False},
+    "SUZLON":      {"shares": 1000, "name": "Suzlon Energy",         "sector": "energy",   "port": True},
+    "KPIGREEN":    {"shares": 23,   "name": "KPI Green Energy",      "sector": "energy",   "port": True},
+    "LT":          {"shares": 40,   "name": "L&T",                   "sector": "infra",    "port": True},
+    "KECL":        {"shares": 160,  "name": "KEC International",     "sector": "infra",    "port": True},
+    "KPIL":        {"shares": 200,  "name": "Kalpataru Projects",    "sector": "infra",    "port": True},
+    "ASHOKA":      {"shares": 370,  "name": "Ashoka Buildcon",       "sector": "infra",    "port": True},
+    "PNCINFRA":    {"shares": 150,  "name": "PNC Infratech",         "sector": "infra",    "port": True},
+    "ENVIROINFRA": {"shares": 600,  "name": "Enviro Infra",          "sector": "infra",    "port": True},
+    "WABAG":       {"shares": 75,   "name": "VA Tech Wabag",         "sector": "infra",    "port": True},
+    "HAL":         {"shares": 0,    "name": "HAL",                   "sector": "infra",    "port": False},
+    "ADANIPORTS":  {"shares": 30,   "name": "Adani Ports",           "sector": "infra",    "port": True},
+    "PTC":         {"shares": 250,  "name": "PTC India",             "sector": "infra",    "port": True},
+    "MARUTI":      {"shares": 5,    "name": "Maruti Suzuki",         "sector": "auto",     "port": True},
+    "TATAMOTORS":  {"shares": 0,    "name": "Tata Motors",           "sector": "auto",     "port": False},
+    "HEROMOTOCO":  {"shares": 62,   "name": "Hero MotoCorp",         "sector": "auto",     "port": True},
+    "M&M":         {"shares": 0,    "name": "Mahindra & Mahindra",   "sector": "auto",     "port": False},
+    "SUNPHARMA":   {"shares": 0,    "name": "Sun Pharma",            "sector": "pharma",   "port": False},
+    "DRREDDY":     {"shares": 0,    "name": "Dr. Reddy's",           "sector": "pharma",   "port": False},
+    "CIPLA":       {"shares": 15,   "name": "Cipla",                 "sector": "pharma",   "port": True},
+    "APOLLOHOSP":  {"shares": 0,    "name": "Apollo Hospitals",      "sector": "pharma",   "port": False},
+    "ITC":         {"shares": 200,  "name": "ITC",                   "sector": "consumer", "port": True},
+    "HINDUNILVR":  {"shares": 0,    "name": "HUL",                   "sector": "consumer", "port": False},
+    "TITAN":       {"shares": 0,    "name": "Titan",                 "sector": "consumer", "port": False},
+    "LLOYDSME":    {"shares": 450,  "name": "Lloyds Metals",         "sector": "metals",   "port": True},
+    "HINDALCO":    {"shares": 50,   "name": "Hindalco",              "sector": "metals",   "port": True},
+    "BHARTIARTL":  {"shares": 25,   "name": "Bharti Airtel",         "sector": "telecom",  "port": True},
+    "IDEA":        {"shares": 13000,"name": "Vodafone Idea",         "sector": "telecom",  "port": True},
+}
+ 
+CRYPTO = {
+    "BTC":  {"qty": 0.03477, "name": "Bitcoin"},
+    "ETH":  {"qty": 1.03506, "name": "Ethereum"},
+    "XRP":  {"qty": 1348.9,  "name": "XRP"},
+    "SOL":  {"qty": 14.01,   "name": "Solana"},
+    "POL":  {"qty": 3202.1,  "name": "Polygon (POL)"},
+}
+ 
+# ── PRICE FETCHER ─────────────────────────────────────────────────────────────
+ 
+def fetch_yahoo(symbol, suffix=""):
+    """Fetch price from Yahoo Finance. suffix='' for US, '.NS' for NSE India"""
+    full = symbol + suffix
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(full)}?interval=1d&range=5d"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+        return round(closes[-1], 2) if closes else None
+    except Exception as e:
+        print(f"  WARN: {full} failed — {e}")
+        return None
+ 
+def fetch_crypto(symbol):
+    """Fetch crypto price from CoinGecko (free, no API key)"""
+    ids = {"BTC": "bitcoin", "ETH": "ethereum", "XRP": "ripple",
+           "SOL": "solana", "POL": "matic-network"}
+    cg_id = ids.get(symbol)
+    if not cg_id:
+        return None
+    url = f"https://api.coingecko.com/api/v3/simple/price?ids={cg_id}&vs_currencies=usd"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        return data[cg_id]["usd"]
+    except Exception as e:
+        print(f"  WARN: Crypto {symbol} failed — {e}")
+        return None
+ 
+def fetch_fx(pair):
+    """Fetch FX rate from Yahoo Finance"""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{pair}=X?interval=1d&range=5d"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read())
+        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+        return round(closes[-1], 2) if closes else None
+    except Exception as e:
+        print(f"  WARN: FX {pair} failed — {e}")
+        return None
+ 
+# ── MAIN ───────────────────────────────────────────────────────────────────────
+ 
+def main():
+    today = datetime.datetime.utcnow().strftime("%B %d, %Y")
+    print(f"=== Portfolio Dashboard Updater — {today} ===\n")
+ 
+    # FX Rates
+    print("Fetching FX rates...")
+    usd_inr = fetch_fx("USDINR") or 95.20
+    aed_inr = fetch_fx("AEDINR") or 25.73
+    print(f"  USD/INR: ₹{usd_inr}  AED/INR: ₹{aed_inr}\n")
+ 
+    # US Stocks
+    print("Fetching US stock prices...")
+    us_prices = {}
+    for sym in US_STOCKS:
+        p = fetch_yahoo(sym)
+        us_prices[sym] = p
+        print(f"  {sym}: ${p}")
+        time.sleep(0.3)
+ 
+    # Commodity ETFs
+    print("\nFetching commodity ETF prices...")
+    cm_prices = {}
+    for sym in COMMODITY_ETFS:
+        p = fetch_yahoo(sym)
+        cm_prices[sym] = p
+        print(f"  {sym}: ${p}")
+        time.sleep(0.3)
+ 
+    # India Stocks
+    print("\nFetching India NSE prices...")
+    in_prices = {}
+    for sym in INDIA_STOCKS:
+        p = fetch_yahoo(sym, ".NS")
+        in_prices[sym] = p
+        print(f"  {sym}.NS: ₹{p}")
+        time.sleep(0.3)
+ 
+    # Crypto
+    print("\nFetching crypto prices...")
+    cr_prices = {}
+    for sym in CRYPTO:
+        p = fetch_crypto(sym)
+        cr_prices[sym] = p
+        print(f"  {sym}: ${p}")
+        time.sleep(0.5)
+ 
+    # ── CALCULATIONS ───────────────────────────────────────────────────────────
+ 
+    us_total_usd = sum(
+        (us_prices.get(s) or 0) * US_STOCKS[s]["shares"]
+        for s in US_STOCKS
+    )
+    cm_total_usd = sum(
+        (cm_prices.get(s) or 0) * COMMODITY_ETFS[s]["shares"]
+        for s in COMMODITY_ETFS
+    )
+    cr_total_usd = sum(
+        (cr_prices.get(s) or 0) * CRYPTO[s]["qty"]
+        for s in CRYPTO
+    )
+    in_total_inr = sum(
+        (in_prices.get(s) or 0) * INDIA_STOCKS[s]["shares"]
+        for s in INDIA_STOCKS
+    )
+ 
+    us_total_inr = us_total_usd * usd_inr
+    cm_total_inr = cm_total_usd * usd_inr
+    cr_total_inr = cr_total_usd * usd_inr
+    mf_inr       = 1791000  # update manually when MF NAVs change
+    total_inr    = in_total_inr + mf_inr + us_total_inr + cr_total_inr + cm_total_inr
+ 
+    def L(x): return f"&#8377;{x/100000:.2f}L"
+    def pct(x): return f"{x/total_inr*100:.1f}%"
+ 
+    print(f"\n=== SUMMARY ===")
+    print(f"India Stocks:  ₹{in_total_inr/100000:.2f}L")
+    print(f"India MFs:     ₹{mf_inr/100000:.2f}L")
+    print(f"US Stocks:     ${us_total_usd:,.0f} = ₹{us_total_inr/100000:.2f}L")
+    print(f"Crypto:        ${cr_total_usd:,.0f} = ₹{cr_total_inr/100000:.2f}L")
+    print(f"Commodities:   ${cm_total_usd:,.0f} = ₹{cm_total_inr/100000:.2f}L")
+    print(f"TOTAL:         ₹{total_inr/100000:.2f}L")
+ 
+    # ── BUILD HTML ─────────────────────────────────────────────────────────────
+ 
+    # India stock rows
+    sector_colors = {
+        "banking": "#1565c0", "it": "#4527a0", "newage": "#b71c1c",
+        "energy": "#e65100", "infra": "#2e7d32", "auto": "#00695c",
+        "pharma": "#558b2f", "consumer": "#6a1b9a", "metals": "#546e7a",
+        "telecom": "#00838f"
+    }
+ 
+    in_rows = ""
+    for sym, info in INDIA_STOCKS.items():
+        price = in_prices.get(sym)
+        val = (price or 0) * info["shares"]
+        sc = sector_colors.get(info["sector"], "#1a2840")
+        port_star = "★ " if info["port"] else ""
+        price_str = f"₹{price:,.2f}" if price else "N/A"
+        val_str = f"₹{val/100000:.2f}L" if val > 0 else "—"
+        in_rows += f"<tr><td style='font-family:monospace;color:#42a5f5'>{port_star}{sym}</td><td>{info['name']}</td><td><span style='background:{sc};color:#fff;font-family:monospace;font-size:8px;padding:1px 6px;border-radius:3px'>{info['sector'].upper()}</span></td><td style='font-family:monospace'>{price_str}</td><td style='color:{'#f5b800' if info['port'] and val>0 else '#ddeaf5'};font-family:monospace'>{val_str}</td></tr>"
+ 
+    us_rows = ""
+    for sym, info in US_STOCKS.items():
+        price = us_prices.get(sym)
+        val_usd = (price or 0) * info["shares"]
+        val_inr = val_usd * usd_inr
+        price_str = f"${price:,.2f}" if price else "N/A"
+        us_rows += f"<tr><td style='font-family:monospace;color:#42a5f5;font-weight:700'>{sym}</td><td>{info['name']}</td><td>{info['shares']}</td><td style='font-family:monospace'>{price_str}</td><td style='color:#42a5f5;font-family:monospace'>${val_usd:,.0f}</td><td style='color:#42a5f5;font-family:monospace'>{L(val_inr)}</td></tr>"
+ 
+    cr_rows = ""
+    for sym, info in CRYPTO.items():
+        price = cr_prices.get(sym)
+        val_usd = (price or 0) * info["qty"]
+        val_inr = val_usd * usd_inr
+        price_str = f"${price:,.4f}" if price else "N/A"
+        cr_rows += f"<tr><td style='font-family:monospace;color:#9c6af0;font-weight:700'>{sym}</td><td>{info['name']}</td><td>{info['qty']}</td><td style='font-family:monospace'>{price_str}</td><td style='color:#9c6af0;font-family:monospace'>${val_usd:,.0f}</td><td style='color:#9c6af0;font-family:monospace'>{L(val_inr)}</td></tr>"
+ 
+    cm_rows = ""
+    for sym, info in COMMODITY_ETFS.items():
+        price = cm_prices.get(sym)
+        val_usd = (price or 0) * info["shares"]
+        val_inr = val_usd * usd_inr
+        price_str = f"${price:,.2f}" if price else "N/A"
+        cm_rows += f"<tr><td style='font-family:monospace;color:#f04f5a;font-weight:700'>{sym}</td><td>{info['name']}</td><td>{info['shares']}</td><td style='font-family:monospace'>{price_str}</td><td style='color:#f04f5a;font-family:monospace'>${val_usd:,.0f}</td><td style='color:#f04f5a;font-family:monospace'>{L(val_inr)}</td></tr>"
+ 
+    p_in  = in_total_inr / total_inr * 100
+    p_mf  = mf_inr / total_inr * 100
+    p_us  = us_total_inr / total_inr * 100
+    p_cr  = cr_total_inr / total_inr * 100
+    p_cm  = cm_total_inr / total_inr * 100
+ 
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Portfolio Dashboard — {today}</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box;}}
+body{{font-family:system-ui,sans-serif;background:#07090e;color:#ddeaf5;font-size:13px;line-height:1.6;}}
+.top{{position:sticky;top:0;z-index:50;background:rgba(7,9,14,.97);border-bottom:1px solid #1a2840;padding:0 18px;display:flex;align-items:center;justify-content:space-between;height:50px;}}
+.brand{{font-size:16px;font-weight:700;}}
+.pill{{font-size:9px;font-family:monospace;padding:2px 10px;border-radius:20px;border:1px solid rgba(30,215,96,.3);background:rgba(30,215,96,.08);color:#1ed760;}}
+.strip{{background:#0a0f18;border-bottom:1px solid #1a2840;padding:8px 18px;display:flex;gap:16px;flex-wrap:wrap;align-items:center;}}
+.si{{display:flex;flex-direction:column;gap:1px;}}
+.si-l{{font-size:7.5px;font-family:monospace;color:#4a6880;text-transform:uppercase;letter-spacing:.4px;}}
+.si-v{{font-size:12px;font-weight:700;}}
+.g{{color:#1ed760;}}.y{{color:#f5a623;}}.r{{color:#f04f5a;}}.pu{{color:#9c6af0;}}.bl{{color:#42a5f5;}}
+.dv{{width:1px;height:28px;background:#1a2840;}}
+.main{{max-width:1400px;margin:0 auto;padding:20px 18px 60px;}}
+h2{{font-size:17px;font-weight:700;margin:24px 0 12px;padding-bottom:8px;border-bottom:1px solid #1a2840;}}
+.big{{display:grid;grid-template-columns:repeat(auto-fill,minmax(175px,1fr));gap:10px;margin-bottom:20px;}}
+.bc{{background:#0f1820;border:1px solid #1a2840;border-radius:10px;padding:12px 14px;}}
+.bc-l{{font-family:monospace;font-size:7.5px;color:#4a6880;text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;}}
+.bc-v{{font-size:20px;font-weight:700;margin-bottom:2px;}}
+.bc-s{{font-size:10px;color:#4a6880;}}
+.pie{{display:flex;height:14px;border-radius:7px;overflow:hidden;margin-bottom:10px;}}
+.pie-leg{{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;}}
+.pl{{display:flex;align-items:center;gap:4px;font-size:9.5px;color:#4a6880;font-family:monospace;}}
+.dot{{width:7px;height:7px;border-radius:50%;flex-shrink:0;}}
+.br{{display:flex;align-items:center;gap:8px;margin-bottom:7px;}}
+.bl2{{font-size:11px;color:#ddeaf5;min-width:160px;}}
+.bt{{flex:1;height:7px;background:#1a2840;border-radius:3px;overflow:hidden;}}
+.bf{{height:100%;border-radius:3px;}}
+.bv{{font-family:monospace;font-size:10px;font-weight:700;min-width:65px;text-align:right;}}
+.bp{{font-family:monospace;font-size:9px;color:#4a6880;min-width:34px;text-align:right;}}
+.tw{{overflow-x:auto;}}
+.tbl{{width:100%;border-collapse:collapse;font-size:11.5px;}}
+.tbl th{{font-family:monospace;font-size:8px;letter-spacing:.5px;text-transform:uppercase;color:#4a6880;padding:7px 11px;text-align:left;border-bottom:1px solid #263a58;background:#141f2e;white-space:nowrap;}}
+.tbl td{{padding:7px 11px;border-bottom:1px solid #1a2840;white-space:nowrap;vertical-align:middle;}}
+.tbl tr:hover td{{background:rgba(255,255,255,.015);}}
+.tbl tfoot td{{background:#141f2e;font-weight:700;}}
+.alloc{{background:#0f1820;border:1px solid #1a2840;border-radius:10px;padding:14px;margin-bottom:20px;}}
+.fx{{display:flex;gap:14px;flex-wrap:wrap;background:#0f1820;border:1px solid #263a58;border-radius:8px;padding:10px 14px;margin-bottom:16px;align-items:center;}}
+.fx-l{{font-family:monospace;font-size:7.5px;color:#4a6880;text-transform:uppercase;}}
+.fx-v{{font-family:monospace;font-size:14px;font-weight:700;color:#f5a623;}}
+::-webkit-scrollbar{{width:4px;height:4px;}}::-webkit-scrollbar-thumb{{background:#1a2840;border-radius:3px;}}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">&#127758; Portfolio Dashboard</div>
+  <div class="pill">AUTO-UPDATED &middot; {today} &middot; USD/INR &#8377;{usd_inr} &middot; AED/INR &#8377;{aed_inr}</div>
+</header>
+<div class="strip">
+  <div class="si"><div class="si-l">Total Net Worth</div><div class="si-v g">{L(total_inr)}</div></div>
+  <div class="dv"></div>
+  <div class="si"><div class="si-l">India Stocks</div><div class="si-v y">{L(in_total_inr)}</div></div>
+  <div class="dv"></div>
+  <div class="si"><div class="si-l">India MFs</div><div class="si-v g">{L(mf_inr)}</div></div>
+  <div class="dv"></div>
+  <div class="si"><div class="si-l">US Stocks</div><div class="si-v bl">{L(us_total_inr)} (${us_total_usd:,.0f})</div></div>
+  <div class="dv"></div>
+  <div class="si"><div class="si-l">Crypto</div><div class="si-v pu">{L(cr_total_inr)} (${cr_total_usd:,.0f})</div></div>
+  <div class="dv"></div>
+  <div class="si"><div class="si-l">Commodities</div><div class="si-v r">{L(cm_total_inr)} (${cm_total_usd:,.0f})</div></div>
+  <div class="dv"></div>
+  <div class="si"><div class="si-l">Updated</div><div class="si-v" style="font-size:10px;color:#4a6880">{today}</div></div>
+</div>
+<main class="main">
+ 
+<div class="fx">
+  <div><div class="fx-l">USD &#8594; INR</div><div class="fx-v">&#8377;{usd_inr}</div></div>
+  <div class="dv" style="height:24px"></div>
+  <div><div class="fx-l">AED &#8594; INR</div><div class="fx-v">&#8377;{aed_inr}</div></div>
+  <div class="dv" style="height:24px"></div>
+  <div><div class="fx-l">Crypto</div><div class="fx-v" style="font-size:13px">USD prices &#215; &#8377;{usd_inr}</div></div>
+  <div style="margin-left:auto;font-family:monospace;font-size:9px;color:#4a6880">Auto-updated daily at 5am GST via GitHub Actions + Yahoo Finance + CoinGecko</div>
+</div>
+ 
+<div class="big">
+  <div class="bc" style="border-left:3px solid #1ed760"><div class="bc-l">Total Net Worth</div><div class="bc-v g">{L(total_inr)}</div><div class="bc-s">All 5 asset classes</div></div>
+  <div class="bc" style="border-left:3px solid #42a5f5"><div class="bc-l">US Stocks ({pct(us_total_inr)})</div><div class="bc-v bl">{L(us_total_inr)}</div><div class="bc-s">${us_total_usd:,.0f} &times; &#8377;{usd_inr}</div></div>
+  <div class="bc" style="border-left:3px solid #f5a623"><div class="bc-l">India Stocks ({pct(in_total_inr)})</div><div class="bc-v y">{L(in_total_inr)}</div><div class="bc-s">NSE previous close</div></div>
+  <div class="bc" style="border-left:3px solid #1ed760"><div class="bc-l">India MFs ({pct(mf_inr)})</div><div class="bc-v g">{L(mf_inr)}</div><div class="bc-s">9 funds &middot; &#8377;14.11L invested</div></div>
+  <div class="bc" style="border-left:3px solid #9c6af0"><div class="bc-l">Crypto ({pct(cr_total_inr)})</div><div class="bc-v pu">{L(cr_total_inr)}</div><div class="bc-s">${cr_total_usd:,.0f} USD</div></div>
+  <div class="bc" style="border-left:3px solid #f04f5a"><div class="bc-l">Commodities ({pct(cm_total_inr)})</div><div class="bc-v r">{L(cm_total_inr)}</div><div class="bc-s">${cm_total_usd:,.0f} USD</div></div>
+</div>
+ 
+<div class="alloc">
+  <div style="font-family:monospace;font-size:8px;color:#4a6880;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px;">Asset Allocation</div>
+  <div class="pie">
+    <div style="flex:{p_us:.1f};background:#42a5f5"></div>
+    <div style="flex:{p_in:.1f};background:#f5a623"></div>
+    <div style="flex:{p_mf:.1f};background:#1ed760"></div>
+    <div style="flex:{p_cr:.1f};background:#9c6af0"></div>
+    <div style="flex:{p_cm:.1f};background:#f04f5a"></div>
+  </div>
+  <div class="pie-leg">
+    <div class="pl"><div class="dot" style="background:#42a5f5"></div>US Stocks {p_us:.1f}%</div>
+    <div class="pl"><div class="dot" style="background:#f5a623"></div>India Stocks {p_in:.1f}%</div>
+    <div class="pl"><div class="dot" style="background:#1ed760"></div>India MFs {p_mf:.1f}%</div>
+    <div class="pl"><div class="dot" style="background:#9c6af0"></div>Crypto {p_cr:.1f}%</div>
+    <div class="pl"><div class="dot" style="background:#f04f5a"></div>Commodities {p_cm:.1f}%</div>
+  </div>
+  <div class="br"><div class="bl2">US Stocks (${us_total_usd:,.0f})</div><div class="bt"><div class="bf" style="width:{p_us:.1f}%;background:#42a5f5"></div></div><div class="bv bl">{L(us_total_inr)}</div><div class="bp">{p_us:.1f}%</div></div>
+  <div class="br"><div class="bl2">India Stocks</div><div class="bt"><div class="bf" style="width:{p_in:.1f}%;background:#f5a623"></div></div><div class="bv y">{L(in_total_inr)}</div><div class="bp">{p_in:.1f}%</div></div>
+  <div class="br"><div class="bl2">India MFs</div><div class="bt"><div class="bf" style="width:{p_mf:.1f}%;background:#1ed760"></div></div><div class="bv g">{L(mf_inr)}</div><div class="bp">{p_mf:.1f}%</div></div>
+  <div class="br"><div class="bl2">Crypto (${cr_total_usd:,.0f})</div><div class="bt"><div class="bf" style="width:{p_cr:.1f}%;background:#9c6af0"></div></div><div class="bv pu">{L(cr_total_inr)}</div><div class="bp">{p_cr:.1f}%</div></div>
+  <div class="br"><div class="bl2">Commodities (${cm_total_usd:,.0f})</div><div class="bt"><div class="bf" style="width:{p_cm:.1f}%;background:#f04f5a"></div></div><div class="bv r">{L(cm_total_inr)}</div><div class="bp">{p_cm:.1f}%</div></div>
+</div>
+ 
+<h2>&#127482;&#127480; US Stock Portfolio &mdash; {L(us_total_inr)} (${us_total_usd:,.0f})</h2>
+<div class="tw"><table class="tbl">
+<thead><tr><th>Ticker</th><th>Company</th><th>Shares</th><th>Price (USD)</th><th>Value (USD)</th><th>Value (INR)</th></tr></thead>
+<tbody>{us_rows}</tbody>
+<tfoot><tr><td colspan="4"><strong>TOTAL</strong></td><td class="bl"><strong>${us_total_usd:,.0f}</strong></td><td class="bl"><strong>{L(us_total_inr)}</strong></td></tr></tfoot>
+</table></div>
+ 
+<h2>&#127470;&#127475; India Stock Portfolio &mdash; {L(in_total_inr)}</h2>
+<div class="tw"><table class="tbl">
+<thead><tr><th>Symbol</th><th>Company</th><th>Sector</th><th>Price (INR)</th><th>Value (INR)</th></tr></thead>
+<tbody>{in_rows}</tbody>
+<tfoot><tr><td colspan="4"><strong>TOTAL</strong></td><td class="y"><strong>{L(in_total_inr)}</strong></td></tr></tfoot>
+</table></div>
+ 
+<h2>&#8383; Crypto &mdash; {L(cr_total_inr)} (${cr_total_usd:,.0f})</h2>
+<div class="tw"><table class="tbl">
+<thead><tr><th>Coin</th><th>Name</th><th>Quantity</th><th>Price (USD)</th><th>Value (USD)</th><th>Value (INR)</th></tr></thead>
+<tbody>{cr_rows}</tbody>
+<tfoot><tr><td colspan="4"><strong>TOTAL</strong></td><td class="pu"><strong>${cr_total_usd:,.0f}</strong></td><td class="pu"><strong>{L(cr_total_inr)}</strong></td></tr></tfoot>
+</table></div>
+ 
+<h2>&#129351; Commodity ETFs &mdash; {L(cm_total_inr)} (${cm_total_usd:,.0f})</h2>
+<div class="tw"><table class="tbl">
+<thead><tr><th>Ticker</th><th>Name</th><th>Shares</th><th>Price (USD)</th><th>Value (USD)</th><th>Value (INR)</th></tr></thead>
+<tbody>{cm_rows}</tbody>
+<tfoot><tr><td colspan="4"><strong>TOTAL</strong></td><td class="r"><strong>${cm_total_usd:,.0f}</strong></td><td class="r"><strong>{L(cm_total_inr)}</strong></td></tr></tfoot>
+</table></div>
+ 
+<div style="font-family:monospace;font-size:8.5px;color:#2a3f55;padding:10px 0;border-top:1px solid #1a2840;margin-top:16px">
+  Auto-generated by portfolio-updater.py &middot; Data: Yahoo Finance (stocks/FX) + CoinGecko (crypto) &middot; Updated: {today} &middot; USD/INR &#8377;{usd_inr} &middot; AED/INR &#8377;{aed_inr} &middot; MF values manually updated &middot; Not investment advice
+</div>
+</main>
+</body>
+</html>"""
+ 
+    with open("docs/index.html", "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"\nDone. docs/index.html written ({len(html):,} bytes)")
+ 
+if __name__ == "__main__":
+    os.makedirs("docs", exist_ok=True)
+    main()
